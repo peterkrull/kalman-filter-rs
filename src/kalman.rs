@@ -1,90 +1,80 @@
 #![allow(non_snake_case)]
 
-use core::ops::Div;
+use nalgebra::SMatrix;
 
-use nalgebra::{self, ArrayStorage, Const, Matrix, SMatrix};
+struct VecMat<const D : usize> {
+    x: SMatrix<f32,D,1>,
+    P: SMatrix<f32,D,D>, 
+}
 
-
-/// Linear state-space Kalman filter implementation utilizing the `nalgebra` library.
+/// Linear state-space `D`-dimensional Kalman filter implementation utilizing the `nalgebra` library.
 pub struct KalmanFilter<const D: usize> {
 
     // Model propagation matrix
-    F: Matrix<f32, Const<D>, Const<D>, ArrayStorage<f32, D, D>>,
+    F: SMatrix<f32,D,D>,
 
     // Model noise covariance matrix
-    Q: Matrix<f32, Const<D>, Const<D>, ArrayStorage<f32, D, D>>,
+    Q: SMatrix<f32,D,D>,
 
     // a priori state vector and covariance matrix
-    prio : VectorMatrix<D>,
+    prio : VecMat<D>,
 
     // a posteriori state vector and covariance matrix
-    post : Option<VectorMatrix<D>>,
-}
+    post : Option<VecMat<D>>,
 
-struct VectorMatrix<const D : usize> {
-    x: Matrix<f32, Const<D>, Const<1>, ArrayStorage<f32, D, 1>>,
-    P: Matrix<f32, Const<D>, Const<D>, ArrayStorage<f32, D, D>>, 
 }
 
 impl<const D: usize> KalmanFilter<D> {
-    // Provide kalman filter with all initial values
-    pub fn new(
-        F: Matrix<f32, Const<D>, Const<D>, ArrayStorage<f32, D, D>>,
-        Q: Matrix<f32, Const<D>, Const<D>, ArrayStorage<f32, D, D>>,
-        x_init: Matrix<f32, Const<D>, Const<1>, ArrayStorage<f32, D, 1>>,
-        P_init: Matrix<f32, Const<D>, Const<D>, ArrayStorage<f32, D, D>>,
-    ) -> Self {
-        Self {
-            F,
-            Q,
-            prio: VectorMatrix{ x : x_init, P : P_init },
-            post: None,
-        }
+    
+    /// Provide kalman filter with all initial values
+    pub fn new( F: SMatrix<f32,D,D>, Q: SMatrix<f32,D,D>, x_init: SMatrix<f32,D,1>, P_init: SMatrix<f32,D,D>) -> Self {
+        Self { F,Q,prio: VecMat{ x : x_init, P : P_init },post: None }
     }
 
-    pub fn predict(&mut self, u: Option<Matrix<f32, Const<D>, Const<1>, ArrayStorage<f32, D, 1>>>) {
-        
+    /// Predict new state
+    pub fn predict(&mut self, u: Option<&SMatrix<f32,D,1>>) {
+
         match self.post.as_mut() {
+
             // Simple prediction, no new observations
             None => {
                 self.prio.x = self.F * self.prio.x;
                 self.prio.P = self.F * self.prio.P * self.F.transpose() + self.Q;
             }
 
-            // Prediction based on new measurements
+            // Prediction based on new observations
             Some(post) => {
+
                 // Finish calc for P_post and symmetrize
-                (*post).P = (*post).P * self.prio.P;
+                post.P = post.P * self.prio.P;
 
                 // Symmetrize P
-                (*post).P = ((*post).P + ((*post).P).transpose()).div(2.0);
+                post.P = (post.P + post.P.transpose())/2.0;
 
                 // Update priors
-                if let Some(u) = u {
-                    self.prio.x = self.F * (*post).x + u;
-                } else {
-                    self.prio.x = self.F * (*post).x;
-                }
-
-                self.prio.P = self.F * (*post).P * self.F.transpose() + self.Q;
+                self.prio.x = self.F * post.x;
+                self.prio.P = self.F * post.P * self.F.transpose() + self.Q;
 
                 // Set posteriors to none
                 self.post = None;
             }
+
+        }
+
+        // Apply input vector
+        if let Some(uv) = u {
+            self.prio.x += uv;
         }
     }
 
-    pub fn update<const D2: usize>(
-        &mut self,
-        H: &Matrix<f32, Const<D2>, Const<D>, ArrayStorage<f32, D2, D>>,
-        R: &Matrix<f32, Const<D2>, Const<D2>, ArrayStorage<f32, D2, D2>>,
-        Z: Matrix<f32, Const<D2>, Const<1>, ArrayStorage<f32, D2, 1>>,
-    ) {
+    /// Update filter with new measurements
+    pub fn update <const M: usize>( &mut self, H: &SMatrix<f32,M,D>, R: &SMatrix<f32,M,M>, Z: &SMatrix<f32,M,1>) {
+        
         // Innovation or measurement pre-fit residual
-        let y = Z - (H * self.prio.x);
+        let y = Z - H * self.prio.x;
 
         // Innovation (or pre-fit residual) covariance
-        let S = (H * self.prio.P * H.transpose()) + R;
+        let S = H * self.prio.P * H.transpose() + R;
 
         // Optimal Kalman gain
         let K = self.prio.P * H.transpose() * S.try_inverse().unwrap();
@@ -92,20 +82,22 @@ impl<const D: usize> KalmanFilter<D> {
         // Updated (a posteriori) estimate covariance
         self.post = Some(match self.post.as_mut() {
             Some(post) => {
-                VectorMatrix {
+                VecMat {
                     x : post.x + K * y,
                     P : post.P - K * H,
                 }
             },
             None => {
-                VectorMatrix {
+                VecMat {
                     x : self.prio.x + K * y,
-                    P : SMatrix::<f32, D, D>::identity() - K * H,
+                    P : SMatrix::identity() - K * H,
                 }
             }
         });
+    }
 
-        // Measurement post-fit residual
-        // let y_post = Z - H * self.x_post.unwrap();
+    /// Get a priori state vector
+    pub fn get_state (&self) -> SMatrix<f32,D,1> {
+        self.prio.x
     }
 }
