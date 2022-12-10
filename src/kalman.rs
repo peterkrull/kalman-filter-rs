@@ -97,6 +97,7 @@ impl<const D: usize> KalmanFilter<D> {
     }
 
     /// Get a priori state vector
+    #[inline]
     pub fn get_state (&self) -> SMatrix<f32,D,1> {
         self.prio.x
     }
