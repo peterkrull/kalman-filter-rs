@@ -2,56 +2,79 @@
 
 use nalgebra::{ComplexField, SMatrix, Scalar, SimdValue};
 
-struct VecMat<const D: usize, F: Scalar + SimdValue + ComplexField + Copy> {
-    x: SMatrix<F, D, 1>,
-    P: SMatrix<F, D, D>,
+struct VecMat<const N: usize, F: Scalar + SimdValue + ComplexField + Copy> {
+    x: SMatrix<F, N, 1>,
+    P: SMatrix<F, N, N>,
 }
 
 /// Linear state-space `D`-dimensional Kalman filter implementation utilizing the `nalgebra` library.
-pub struct KalmanFilter<const D: usize, F: Scalar + SimdValue + ComplexField + Copy> {
+pub struct KalmanFilter<const Nx: usize, const Nu: usize, F: Scalar + SimdValue + ComplexField + Copy> {
+
     // Model propagation matrix
-    F: SMatrix<F, D, D>,
+    A: SMatrix<F, Nx, Nx>,
+
+    // Model propagation matrix
+    B: SMatrix<F, Nx, Nu>,
 
     // Model noise covariance matrix
-    Q: SMatrix<F, D, D>,
+    Q: SMatrix<F, Nx, Nx>,
 
     // a priori state vector and covariance matrix
-    prio: VecMat<D, F>,
+    prio: VecMat<Nx, F>,
 
     // a posteriori state vector and covariance matrix
-    post: Option<VecMat<D, F>>,
+    post: Option<VecMat<Nx, F>>,
 
-    // Previous control input
-    uv: Option<SMatrix<F, D, 1>>,
 }
 
-impl<const D: usize, F: Scalar + SimdValue + ComplexField + Copy> KalmanFilter<D, F> {
+impl<const Nx: usize, const Nu: usize, F: Scalar + SimdValue + ComplexField + Copy> KalmanFilter<Nx, Nu, F> {
     /// Provide kalman filter with all initial values
     pub fn new(
-        F: SMatrix<F, D, D>,
-        Q: SMatrix<F, D, D>,
-        x_init: SMatrix<F, D, 1>,
-        P_init: SMatrix<F, D, D>,
+        A: SMatrix<F, Nx, Nx>,
+        B: Option<SMatrix<F, Nx, Nu>>,
+        Q: SMatrix<F, Nx, Nx>,
+        x_init: SMatrix<F, Nx, 1>,
+        P_init: SMatrix<F, Nx, Nx>,
     ) -> Self {
         Self {
-            F,
+            A,
+            B : match B {
+                Some(B) => B,
+                None => SMatrix::from_element(nalgebra::convert(0.0)),
+            },
             Q,
             prio: VecMat {
                 x: x_init,
                 P: P_init,
             },
             post: None,
-            uv: None,
         }
+    }
+
+    pub fn set_A(&mut self, new_A : SMatrix<F, Nx, Nx>) {
+        self.A = new_A;
+    }
+
+    pub fn set_B(&mut self, new_B : Option<SMatrix<F, Nx, Nu>>) {
+        self.B = match new_B {
+            Some(B) => B,
+            None => SMatrix::from_element(nalgebra::convert(0.0)),
+        };
     }
 
     /// Predict new state
     pub fn predict(&mut self) {
+        let u : SMatrix<F, Nu, 1> = SMatrix::from_element(nalgebra::convert(0.0));
+        self.predict_with_input(u)
+    }
+
+    /// Predict new state using input
+    pub fn predict_with_input(&mut self, u : SMatrix<F, Nu, 1>) {
         match self.post.as_mut() {
             // Simple prediction, no new observations
             None => {
-                self.prio.x = self.F * self.prio.x;
-                self.prio.P = self.F * self.prio.P * self.F.transpose() + self.Q;
+                self.prio.x = self.A * self.prio.x + self.B*u;
+                self.prio.P = self.A * self.prio.P * self.A.transpose() + self.Q;
             }
 
             // Prediction based on new observations
@@ -63,8 +86,8 @@ impl<const D: usize, F: Scalar + SimdValue + ComplexField + Copy> KalmanFilter<D
                 post.P = (post.P + post.P.transpose()).scale(nalgebra::convert(0.5));
 
                 // Update priors
-                self.prio.x = self.F * post.x;
-                self.prio.P = self.F * post.P * self.F.transpose() + self.Q;
+                self.prio.x = self.A * post.x + self.B*u;
+                self.prio.P = self.A * post.P * self.A.transpose() + self.Q;
 
                 // Set posteriors to none
                 self.post = None;
@@ -72,51 +95,39 @@ impl<const D: usize, F: Scalar + SimdValue + ComplexField + Copy> KalmanFilter<D
         }
     }
 
-    pub fn control_input(&mut self, u: Option<&SMatrix<F, D, 1>>) {
-        // Apply input vector
-        if let Some(prev_uv) = self.uv {
-            self.prio.x -= prev_uv;
-        }
-        if let Some(uv) = u {
-            self.prio.x += uv;
-            self.uv = Some(*uv);
-        } else {
-            self.uv = None
-        }
-    }
-
     /// Update filter with new measurements
-    pub fn update<const M: usize>(
+    pub fn update<const Ny: usize>(
         &mut self,
-        H: &SMatrix<F, M, D>,
-        R: &SMatrix<F, M, M>,
-        Z: &SMatrix<F, M, 1>,
+        C: &SMatrix<F, Ny, Nx>, // Output matrix
+        R: &SMatrix<F, Ny, Ny>, // Covariance
+        y: &SMatrix<F, Ny, 1>, // Measurement
     ) {
-        // Innovation or measurement pre-fit residual
-        let y = Z - H * self.prio.x;
+        // Measurement prediction residual
+        let y_res = y - C * self.prio.x;
 
         // Innovation (or pre-fit residual) covariance
-        let S = H * self.prio.P * H.transpose() + R;
+        let S = C * self.prio.P * C.transpose() + R;
 
         // Optimal Kalman gain
-        let K = self.prio.P * H.transpose() * S.try_inverse().unwrap();
+        let Some(Sinv) = S.try_inverse() else { return };
+        let K = self.prio.P * C.transpose() * Sinv;
 
         // Updated (a posteriori) estimate covariance
         self.post = Some(match self.post.as_mut() {
             Some(post) => VecMat {
-                x: post.x + K * y,
-                P: post.P - K * H,
+                x: post.x + K * y_res,
+                P: post.P - K * C,
             },
             None => VecMat {
-                x: self.prio.x + K * y,
-                P: SMatrix::identity() - K * H,
+                x: self.prio.x + K * y_res,
+                P: SMatrix::identity() - K * C,
             },
         });
     }
 
-    /// Get a priori state vector
+    /// Get state vector
     #[inline]
-    pub fn get_state(&self) -> SMatrix<F, D, 1> {
+    pub fn get_state(&self) -> SMatrix<F, Nx, 1> {
         if let Some(post) = &self.post {
             post.x
         } else {
