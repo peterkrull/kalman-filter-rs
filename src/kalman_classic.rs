@@ -9,7 +9,7 @@ struct VecMat<const N: usize, F: Scalar + SimdValue + ComplexField + Copy> {
 }
 
 /// Linear state-space `Nx`-dimensional Kalman filter implementation utilizing the `nalgebra` library.
-pub struct KalmanFilter<const Nx: usize, const Nu: usize, F: Scalar + SimdValue + ComplexField + Copy> {
+pub struct KalmanFilter<const Nx: usize, const Nu: usize, const Ny: usize, F: Scalar + SimdValue + ComplexField + Copy> {
 
     // Model propagation matrix
     A: SMatrix<F, Nx, Nx>,
@@ -17,8 +17,14 @@ pub struct KalmanFilter<const Nx: usize, const Nu: usize, F: Scalar + SimdValue 
     // Input matrix
     B: SMatrix<F, Nx, Nu>,
 
+    // Output matrix
+    C: SMatrix<F, Ny, Nx>,
+
     // Model noise covariance matrix
     Q: SMatrix<F, Nx, Nx>,
+
+    // Model noise covariance matrix
+    R: SMatrix<F, Ny, Ny>,
 
     // A priori state vector and covariance matrix
     prio: VecMat<Nx, F>,
@@ -28,22 +34,19 @@ pub struct KalmanFilter<const Nx: usize, const Nu: usize, F: Scalar + SimdValue 
 
 }
 
-impl<const Nx: usize, const Nu: usize, F: Scalar + SimdValue + ComplexField + Copy> KalmanFilter<Nx, Nu, F> {
+impl<const Nx: usize, const Nu: usize, const Ny: usize, F: Scalar + SimdValue + ComplexField + Copy> KalmanFilter<Nx, Nu, Ny, F> {
     /// Provide kalman filter with all initial values
     pub fn new(
         A: SMatrix<F, Nx, Nx>,
-        B: Option<SMatrix<F, Nx, Nu>>,
+        B: SMatrix<F, Nx, Nu>,
+        C: SMatrix<F, Ny, Nx>,
         Q: SMatrix<F, Nx, Nx>,
+        R: SMatrix<F, Ny, Ny>,
         x_init: SMatrix<F, Nx, 1>,
         P_init: SMatrix<F, Nx, Nx>,
     ) -> Self {
         Self {
-            A,
-            B : match B {
-                Some(B) => B,
-                None => SMatrix::from_element(nalgebra::convert(0.0)),
-            },
-            Q,
+            A,B,C,Q,R,
             prio: VecMat {
                 x: x_init,
                 P: P_init,
@@ -52,22 +55,10 @@ impl<const Nx: usize, const Nu: usize, F: Scalar + SimdValue + ComplexField + Co
         }
     }
 
-    pub fn set_A(&mut self, new_A : SMatrix<F, Nx, Nx>) {
-        self.A = new_A;
-    }
-
-    pub fn set_B(&mut self, new_B : Option<SMatrix<F, Nx, Nu>>) {
-        self.B = match new_B {
-            Some(B) => B,
-            None => SMatrix::from_element(nalgebra::convert(0.0)),
-        };
-    }
-
     /// Predict new state. If plant dynamics are time-dependent,
     /// this method (or `.predict_with_input`) must be called at the correct frequency.
     pub fn predict(&mut self) {
-        let u : SMatrix<F, Nu, 1> = SMatrix::from_element(nalgebra::convert(0.0));
-        self.predict_with_input(u)
+        self.predict_with_input(SMatrix::zeros())
     }
 
     /// Predict new state using input. If plant dynamics are time-dependent,
@@ -99,31 +90,26 @@ impl<const Nx: usize, const Nu: usize, F: Scalar + SimdValue + ComplexField + Co
     }
 
     /// Update filter with new measurements
-    pub fn update<const Ny: usize>(
-        &mut self,
-        C: &SMatrix<F, Ny, Nx>, // Output matrix
-        R: &SMatrix<F, Ny, Ny>, // Covariance
-        y: &SMatrix<F, Ny, 1>, // Measurement
-    ) {
+    pub fn update(&mut self, y: &SMatrix<F, Ny, 1>) {
         // Measurement prediction residual
-        let y_res = y - C * self.prio.x;
+        let y_res = y - self.C * self.prio.x;
 
         // Innovation (or pre-fit residual) covariance
-        let S = C * self.prio.P * C.transpose() + R;
+        let S = self.C * self.prio.P * self.C.transpose() + self.R;
 
         // Optimal Kalman gain
         let Some(Sinv) = S.try_inverse() else { return };
-        let K = self.prio.P * C.transpose() * Sinv;
+        let K = self.prio.P * self.C.transpose() * Sinv;
 
         // Updated (a posteriori) estimate covariance
         self.post = Some(match self.post.as_mut() {
             Some(post) => VecMat {
                 x: post.x + K * y_res,
-                P: post.P - K * C,
+                P: post.P - K * self.C,
             },
             None => VecMat {
                 x: self.prio.x + K * y_res,
-                P: SMatrix::identity() - K * C,
+                P: SMatrix::identity() - K * self.C,
             },
         });
     }
