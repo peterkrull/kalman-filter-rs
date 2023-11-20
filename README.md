@@ -1,2 +1,2 @@
-# kalman_filter_rust
-Kalman filter implementation in rust. Developed as a learning exercise, intended for state estimation in embedded systems.
+# Kalman filters in Rust
+Kalman filter implementations in Rust, intended for embedded, such as `no_std`, environments. Currently linear and extended Kalman filters are implemented.
