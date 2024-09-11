@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 nalgebra = { version = ">0.30" , default-features = false , features = ['libm','macros']}
-assert_approx_eq = "1.1.0"
 
 [dev-dependencies]
+assert_approx_eq = "1.1.0"
 rand = "0.8"
